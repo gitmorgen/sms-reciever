@@ -159,10 +159,11 @@ input[type=password]:focus{border-color:#00a884}
   </form>
 </div>
 <script>
+const B=location.pathname.startsWith('/sms')?'/sms-api':'/api';
 async function doLogin(e){
   e.preventDefault();
   const pw=document.getElementById('pw').value;
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+  const r=await fetch(B+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
   if(r.ok){location.reload();}else{document.getElementById('err').style.display='block';document.getElementById('pw').value='';}
   return false;
 }
@@ -275,6 +276,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 </div>
 <script>
 let allMessages=[],selectedContact=null,knownHash="",currentTab="inbox";
+const B=location.pathname.startsWith('/sms')?'/sms-api':'/api';
 const isMobile=()=>window.innerWidth<=600;
 
 function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
@@ -368,7 +370,7 @@ function selectContact(c){
   selectedContact=c;
   if(isMobile())document.body.classList.add("show-chat");
   // Mark as read
-  fetch("/api/mark-read",{method:"POST",headers:{"Content-Type":"application/json"},
+  fetch(B+"/mark-read",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({sender:c})});
   allMessages.forEach(m=>{if((m.from||"Unknown")===c)m.read=true;});
   renderContacts();
@@ -379,7 +381,7 @@ function archiveContact(c){
   const grouped=groupByContact();
   const isCurrentlyArchived=grouped[c]&&grouped[c].some(m=>m.archived);
   const newState=!isCurrentlyArchived;
-  fetch("/api/archive",{method:"POST",headers:{"Content-Type":"application/json"},
+  fetch(B+"/archive",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({sender:c,archived:newState})});
   allMessages.forEach(m=>{if((m.from||"Unknown")===c)m.archived=newState;});
   selectedContact=null;
@@ -459,18 +461,18 @@ async function changePw(){
   const msg=document.getElementById('pw-msg');
   if(!np||np.length<1){msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Password cannot be empty';return;}
   if(np!==cp){msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Passwords do not match';return;}
-  const r=await fetch('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:np})});
+  const r=await fetch(B+'/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:np})});
   if(r.ok){msg.style.display='block';msg.style.color='#00a884';msg.textContent='Password updated!';document.getElementById('new-pw').value='';document.getElementById('confirm-pw').value='';}
   else{msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Failed to update';}
 }
 async function doLogout(){
-  await fetch('/api/logout',{method:'POST'});
+  await fetch(B+'/logout',{method:'POST'});
   location.reload();
 }
 
 async function poll(){
   try{
-    const r=await fetch("/api/messages");
+    const r=await fetch(B+"/messages");
     if(r.status===401){location.reload();return;}
     const data=await r.json();
     const h=JSON.stringify(data);
