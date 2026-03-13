@@ -124,6 +124,10 @@ def is_valid_session(token):
     return token in sessions
 
 
+def invalidate_session(token):
+    sessions.discard(token)
+
+
 LOGIN_PAGE = r"""<!DOCTYPE html><html><head><title>SMS Inbox - Login</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -423,7 +427,7 @@ function renderMessages(){
     </div>`;
   });
   html+=`</div></div>
-  <div id="status-bar">Read-only inbox &mdash; listening for messages on POST /sms</div>`;
+  <div id="status-bar">Read-only inbox &mdash; listening for messages on POST /sms-new</div>`;
   main.innerHTML=html;
   const mc=document.getElementById("messages");
   if(mc)mc.scrollTop=mc.scrollHeight;
@@ -459,8 +463,8 @@ async function changePw(){
   if(r.ok){msg.style.display='block';msg.style.color='#00a884';msg.textContent='Password updated!';document.getElementById('new-pw').value='';document.getElementById('confirm-pw').value='';}
   else{msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Failed to update';}
 }
-function doLogout(){
-  document.cookie='session=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT';
+async function doLogout(){
+  await fetch('/api/logout',{method:'POST'});
   location.reload();
 }
 
@@ -536,7 +540,7 @@ class SMSHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path == "/sms":
+        if self.path == "/sms-new":
             try:
                 data = json.loads(self._read_body())
                 sender = data.get("from", "Unknown")
@@ -564,6 +568,15 @@ class SMSHandler(BaseHTTPRequestHandler):
                     self._json_response(401, {"error": "wrong password"})
             except json.JSONDecodeError:
                 self._json_response(400, {"error": "invalid json"})
+        elif self.path == "/api/logout":
+            token = self._get_session()
+            if token:
+                invalidate_session(token)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
         elif self.path == "/api/change-password":
             if not self._require_auth():
                 return
@@ -624,5 +637,5 @@ if __name__ == "__main__":
     print(f"SMS Inbox running on:")
     print(f"  http://localhost:{port}")
     print(f"  http://{local_ip}:{port}")
-    print(f"Configure SMS Forwarder to POST to http://{local_ip}:{port}/sms")
+    print(f"Configure SMS Forwarder to POST to http://{local_ip}:{port}/sms-new")
     server.serve_forever()
