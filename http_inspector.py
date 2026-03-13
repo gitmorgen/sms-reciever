@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.cookies import SimpleCookie
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import socket
 import threading
@@ -9,6 +12,7 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sms.db")
 db_lock = threading.Lock()
+sessions = set()  # in-memory active session tokens
 
 
 def init_db():
@@ -78,6 +82,87 @@ def set_archived(sender, archived):
             )
             conn.commit()
 
+
+def _hash_pw(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+
+def init_auth():
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )""")
+            row = conn.execute("SELECT value FROM settings WHERE key='password'").fetchone()
+            if not row:
+                conn.execute("INSERT INTO settings (key, value) VALUES ('password', ?)", (_hash_pw("botwinik"),))
+            conn.commit()
+
+
+def check_password(pw):
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key='password'").fetchone()
+    return row and row[0] == _hash_pw(pw)
+
+
+def change_password(new_pw):
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE settings SET value=? WHERE key='password'", (_hash_pw(new_pw),))
+            conn.commit()
+
+
+def create_session():
+    token = secrets.token_hex(32)
+    sessions.add(token)
+    return token
+
+
+def is_valid_session(token):
+    return token in sessions
+
+
+LOGIN_PAGE = r"""<!DOCTYPE html><html><head><title>SMS Inbox - Login</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#111b21;color:#e9edef}
+.login-box{background:#1f2c34;padding:40px;border-radius:12px;width:340px;max-width:90vw;
+  text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.login-box h1{font-size:22px;margin-bottom:6px;color:#e9edef}
+.login-box p{font-size:13px;color:#8696a0;margin-bottom:24px}
+.login-box svg{width:48px;height:48px;fill:#00a884;margin-bottom:16px}
+input[type=password]{width:100%;padding:12px 14px;border-radius:8px;border:1px solid #333d45;
+  background:#111b21;color:#e9edef;font-size:15px;outline:none;margin-bottom:12px}
+input[type=password]:focus{border-color:#00a884}
+.login-btn{width:100%;padding:12px;border:none;border-radius:8px;background:#00a884;
+  color:#111b21;font-size:15px;font-weight:600;cursor:pointer;transition:background .15s}
+.login-btn:hover{background:#00c49a}
+.error{color:#ef5350;font-size:13px;margin-bottom:12px;display:none}
+</style></head><body>
+<div class="login-box">
+  <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
+  <h1>SMS Inbox</h1>
+  <p>Enter password to continue</p>
+  <div class="error" id="err">Incorrect password</div>
+  <form onsubmit="return doLogin(event)">
+    <input type="password" id="pw" placeholder="Password" autofocus>
+    <button type="submit" class="login-btn">Sign In</button>
+  </form>
+</div>
+<script>
+async function doLogin(e){
+  e.preventDefault();
+  const pw=document.getElementById('pw').value;
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+  if(r.ok){location.reload();}else{document.getElementById('err').style.display='block';document.getElementById('pw').value='';}
+  return false;
+}
+</script></body></html>""" 
 
 HTML_PAGE = r"""<!DOCTYPE html><html><head><title>SMS Inbox</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -166,7 +251,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 <div id="sidebar">
   <div id="sidebar-header">
     <span>SMS Inbox</span>
-    <span class="read-only">READ-ONLY</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <span class="read-only">READ-ONLY</span>
+      <button class="hdr-btn" onclick="showSettings()" style="font-size:16px;border:none;padding:4px 8px" title="Settings">&#9881;</button>
+    </div>
   </div>
   <div class="tab-bar">
     <div class="tab active" id="tab-inbox" onclick="switchTab('inbox')">Inbox <span class="tab-count" id="inbox-count">0</span></div>
@@ -341,9 +429,45 @@ function renderMessages(){
   if(mc)mc.scrollTop=mc.scrollHeight;
 }
 
+function showSettings(){
+  const main=document.getElementById("main");
+  selectedContact=null;
+  if(isMobile())document.body.classList.add("show-chat");
+  renderContacts();
+  main.innerHTML=`<div id="chat-header">
+    <button class="back-btn" onclick="goBack()">&larr;</button>
+    <div style="font-size:24px;margin-right:8px">&#9881;</div>
+    <div><div id="chat-header-name">Settings</div>
+    <div id="chat-header-sub">Change password</div></div>
+  </div>
+  <div style="padding:30px 40px;max-width:400px">
+    <div style="margin-bottom:20px;color:#8696a0;font-size:14px">Change your login password:</div>
+    <input type="password" id="new-pw" placeholder="New password" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid #333d45;background:#111b21;color:#e9edef;font-size:14px;outline:none;margin-bottom:10px">
+    <input type="password" id="confirm-pw" placeholder="Confirm new password" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid #333d45;background:#111b21;color:#e9edef;font-size:14px;outline:none;margin-bottom:14px">
+    <div id="pw-msg" style="font-size:13px;margin-bottom:10px;display:none"></div>
+    <button class="hdr-btn" style="padding:10px 20px;font-size:14px" onclick="changePw()">Update Password</button>
+    <hr style="border-color:#222d34;margin:24px 0">
+    <button class="hdr-btn" style="padding:10px 20px;font-size:14px;color:#ef5350;border-color:#ef5350" onclick="doLogout()">Log Out</button>
+  </div>`;
+}
+async function changePw(){
+  const np=document.getElementById('new-pw').value,cp=document.getElementById('confirm-pw').value;
+  const msg=document.getElementById('pw-msg');
+  if(!np||np.length<1){msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Password cannot be empty';return;}
+  if(np!==cp){msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Passwords do not match';return;}
+  const r=await fetch('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:np})});
+  if(r.ok){msg.style.display='block';msg.style.color='#00a884';msg.textContent='Password updated!';document.getElementById('new-pw').value='';document.getElementById('confirm-pw').value='';}
+  else{msg.style.display='block';msg.style.color='#ef5350';msg.textContent='Failed to update';}
+}
+function doLogout(){
+  document.cookie='session=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  location.reload();
+}
+
 async function poll(){
   try{
     const r=await fetch("/api/messages");
+    if(r.status===401){location.reload();return;}
     const data=await r.json();
     const h=JSON.stringify(data);
     if(h!==knownHash){
@@ -370,14 +494,43 @@ class SMSHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(obj).encode())
 
+    def _get_session(self):
+        cookie_header = self.headers.get("Cookie", "")
+        c = SimpleCookie()
+        c.load(cookie_header)
+        if "session" in c:
+            return c["session"].value
+        return None
+
+    def _is_authed(self):
+        token = self._get_session()
+        return token and is_valid_session(token)
+
+    def _require_auth(self):
+        if not self._is_authed():
+            self._json_response(401, {"error": "unauthorized"})
+            return False
+        return True
+
+    def _serve_login(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(LOGIN_PAGE.encode())
+
     def do_GET(self):
         if self.path == "/api/messages":
+            if not self._require_auth():
+                return
             self._json_response(200, get_all_messages())
         elif self.path in ("/", ""):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(HTML_PAGE.encode())
+            if self._is_authed():
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(HTML_PAGE.encode())
+            else:
+                self._serve_login()
         else:
             self.send_response(404)
             self.end_headers()
@@ -396,7 +549,37 @@ class SMSHandler(BaseHTTPRequestHandler):
                 self._json_response(200, {"status": "ok"})
             except json.JSONDecodeError:
                 self._json_response(400, {"error": "invalid json"})
+        elif self.path == "/api/login":
+            try:
+                data = json.loads(self._read_body())
+                pw = data.get("password", "")
+                if check_password(pw):
+                    token = create_session()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Set-Cookie", f"session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "ok"}).encode())
+                else:
+                    self._json_response(401, {"error": "wrong password"})
+            except json.JSONDecodeError:
+                self._json_response(400, {"error": "invalid json"})
+        elif self.path == "/api/change-password":
+            if not self._require_auth():
+                return
+            try:
+                data = json.loads(self._read_body())
+                new_pw = data.get("password", "")
+                if not new_pw:
+                    self._json_response(400, {"error": "password required"})
+                    return
+                change_password(new_pw)
+                self._json_response(200, {"status": "ok"})
+            except json.JSONDecodeError:
+                self._json_response(400, {"error": "invalid json"})
         elif self.path == "/api/mark-read":
+            if not self._require_auth():
+                return
             try:
                 data = json.loads(self._read_body())
                 sender = data.get("sender", "")
@@ -406,6 +589,8 @@ class SMSHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._json_response(400, {"error": "invalid json"})
         elif self.path == "/api/archive":
+            if not self._require_auth():
+                return
             try:
                 data = json.loads(self._read_body())
                 sender = data.get("sender", "")
@@ -425,6 +610,7 @@ class SMSHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    init_auth()
     port = 8888
     server = HTTPServer(("0.0.0.0", port), SMSHandler)
     local_ip = "?"
